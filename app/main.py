@@ -9,6 +9,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.requests import Request
 from fastapi.responses import JSONResponse, PlainTextResponse
+from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.auth import make_verify_api_key
@@ -120,7 +121,7 @@ async def create_transcription(
     word_timestamps = response_format == "verbose_json" and "word" in timestamp_granularities
 
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=True) as tmp:
-        shutil.copyfileobj(file.file, tmp)
+        await run_in_threadpool(shutil.copyfileobj, file.file, tmp)
         tmp.flush()
 
         actual_size = os.path.getsize(tmp.name)

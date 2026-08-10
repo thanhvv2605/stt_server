@@ -39,3 +39,15 @@ def test_wrong_api_key_rejected():
     client = TestClient(build_app("secret123"))
     resp = client.get("/protected", headers={"Authorization": "Bearer wrong"})
     assert resp.status_code == 401
+
+
+def test_non_ascii_api_key_rejected_not_500():
+    # Latin-1-decodable but non-ASCII bytes in the Authorization header (as
+    # Starlette would decode them) must not crash hmac.compare_digest.
+    client = TestClient(build_app("secret123"))
+    resp = client.get(
+        "/protected",
+        headers={"Authorization": ("Bearer " + "é").encode("latin-1")},
+    )
+    assert resp.status_code == 401
+    assert resp.json()["detail"]["error"]["type"] == "invalid_api_key"

@@ -9,7 +9,9 @@ def make_verify_api_key(settings: Settings):
     expected = f"Bearer {settings.api_key}"
 
     async def verify_api_key(authorization: str = Header(default="")) -> None:
-        if not hmac.compare_digest(authorization, expected):
+        if not hmac.compare_digest(
+            authorization.encode("latin-1", "ignore"), expected.encode("latin-1")
+        ):
             raise HTTPException(
                 status_code=401,
                 detail={"error": {"message": "Invalid or missing API key", "type": "invalid_api_key"}},
