@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 .env
 .pytest_cache/
+sample.wav
+long_sample.wav
+result_*.json
