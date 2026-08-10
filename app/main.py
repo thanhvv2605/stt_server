@@ -1,5 +1,6 @@
 import logging
 import os
+import shutil
 import tempfile
 from contextlib import asynccontextmanager
 from typing import List
@@ -8,9 +9,10 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.requests import Request
 from fastapi.responses import JSONResponse, PlainTextResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.auth import make_verify_api_key
-from app.config import Settings, get_settings
+from app.config import get_settings
 from app.schemas import Segment, TranscriptionJSON, TranscriptionVerboseJSON, Word
 from app.transcribe import TranscriptionService
 
@@ -24,10 +26,17 @@ verify_api_key = make_verify_api_key(settings)
 async def lifespan(app: FastAPI):
     from faster_whisper import WhisperModel
 
+    logging.basicConfig(level=logging.INFO)
+
     if settings.api_key == "changeme-please-set-STT_API_KEY":
         logger.warning("STT_API_KEY not set — using insecure default dev key")
 
-    model = WhisperModel(settings.model_id, device=settings.device, compute_type=settings.compute_type)
+    model = WhisperModel(
+        settings.model_id,
+        device=settings.device,
+        compute_type=settings.compute_type,
+        num_workers=settings.max_concurrent_transcriptions,
+    )
     app.state.transcription_service = TranscriptionService(model, settings.max_concurrent_transcriptions)
     yield
     app.state.transcription_service.shutdown()
@@ -40,8 +49,8 @@ def get_transcription_service() -> TranscriptionService:
     return app.state.transcription_service
 
 
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request: Request, exc: HTTPException):
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     if isinstance(exc.detail, dict) and "error" in exc.detail:
         return JSONResponse(status_code=exc.status_code, content=exc.detail)
     return JSONResponse(
@@ -52,14 +61,26 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    logger.warning("Request validation failed: %s", exc.errors())
     return JSONResponse(
         status_code=400,
-        content={"error": {"message": str(exc), "type": "invalid_request_error"}},
+        content={"error": {"message": "Invalid request", "type": "invalid_request_error"}},
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    logger.exception("Unhandled exception while processing request")
+    return JSONResponse(
+        status_code=500,
+        content={"error": {"message": "internal server error", "type": "server_error"}},
     )
 
 
 @app.get("/health")
 async def health():
+    if getattr(app.state, "transcription_service", None) is None:
+        return JSONResponse(status_code=503, content={"status": "loading"})
     return {"status": "ok"}
 
 
@@ -83,9 +104,8 @@ async def create_transcription(
             },
         )
 
-    contents = await file.read()
     max_bytes = settings.max_file_size_mb * 1024 * 1024
-    if len(contents) > max_bytes:
+    if file.size is not None and file.size > max_bytes:
         raise HTTPException(
             status_code=413,
             detail={
@@ -95,23 +115,36 @@ async def create_transcription(
                 }
             },
         )
-    if len(contents) == 0:
-        raise HTTPException(
-            status_code=400,
-            detail={"error": {"message": "Uploaded file is empty", "type": "invalid_request_error"}},
-        )
 
-    suffix = os.path.splitext(file.filename or "")[1] or ".audio"
-    word_timestamps = "word" in timestamp_granularities
+    suffix = os.path.splitext(file.filename or "")[1][:10] or ".audio"
+    word_timestamps = response_format == "verbose_json" and "word" in timestamp_granularities
 
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=True) as tmp:
-        tmp.write(contents)
+        shutil.copyfileobj(file.file, tmp)
         tmp.flush()
+
+        actual_size = os.path.getsize(tmp.name)
+        if actual_size > max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail={
+                    "error": {
+                        "message": f"File exceeds max size of {settings.max_file_size_mb}MB",
+                        "type": "file_too_large",
+                    }
+                },
+            )
+        if actual_size == 0:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": {"message": "Uploaded file is empty", "type": "invalid_request_error"}},
+            )
+
         try:
             result = await service.transcribe(
                 tmp.name, language=language or None, word_timestamps=word_timestamps
             )
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, IndexError) as exc:
             logger.warning("Could not decode audio: %s", exc)
             raise HTTPException(
                 status_code=400,

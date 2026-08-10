@@ -3,10 +3,16 @@ import io
 from fastapi.testclient import TestClient
 
 from app import main as main_module
+from app.config import Settings
 from app.main import app, get_transcription_service, verify_api_key
 from app.transcribe import SegmentResult, TranscriptionResult, WordResult
 
 app.dependency_overrides[verify_api_key] = lambda: None
+# Tests exercise the transcription endpoint via dependency_overrides on
+# get_transcription_service rather than by running the real lifespan, so
+# app.state.transcription_service is never populated by startup here.
+# Simulate a "ready" app so the /health check behaves like production.
+app.state.transcription_service = object()
 client = TestClient(app)
 
 
@@ -31,6 +37,20 @@ def test_health_check():
     resp = client.get("/health")
     assert resp.status_code == 200
     assert resp.json() == {"status": "ok"}
+
+
+def test_health_check_not_ready():
+    had_attr = hasattr(app.state, "transcription_service")
+    previous = getattr(app.state, "transcription_service", None)
+    if had_attr:
+        delattr(app.state, "transcription_service")
+    try:
+        resp = client.get("/health")
+        assert resp.status_code == 503
+        assert resp.json() == {"status": "loading"}
+    finally:
+        if had_attr:
+            app.state.transcription_service = previous
 
 
 def test_json_response_default():
@@ -107,7 +127,7 @@ def test_missing_file_field_rejected():
 
 
 def test_file_too_large_rejected(monkeypatch):
-    small_limit_settings = main_module.Settings(
+    small_limit_settings = Settings(
         model_id=main_module.settings.model_id,
         device=main_module.settings.device,
         compute_type=main_module.settings.compute_type,
