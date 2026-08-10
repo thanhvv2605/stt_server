@@ -73,6 +73,8 @@ All error responses (auth failures, invalid requests, decode failures, internal 
 | 400 | `invalid_request_error` | Malformed request, unsupported `response_format`, empty file, or audio that can't be decoded |
 | 401 | `invalid_api_key` | Missing or incorrect `Authorization: Bearer <key>` header |
 | 413 | `file_too_large` | Upload exceeds `MAX_FILE_SIZE_MB` |
+| 404 | `error` | No route matches the request path |
+| 405 | `error` | HTTP method not allowed for the matched route |
 | 500 | `server_error` | Any unexpected unhandled exception |
 | 503 | `server_error` | Transcription failed for a reason other than a decode error (e.g. transient GPU/model failure) |
 
