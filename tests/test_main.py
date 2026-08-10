@@ -99,6 +99,13 @@ def test_empty_file_rejected():
     assert resp.status_code == 400
 
 
+def test_missing_file_field_rejected():
+    app.dependency_overrides[get_transcription_service] = lambda: FakeService(_sample_result())
+    resp = client.post("/v1/audio/transcriptions", files={})
+    assert resp.status_code == 400
+    assert resp.json()["error"]["type"] == "invalid_request_error"
+
+
 def test_file_too_large_rejected(monkeypatch):
     small_limit_settings = main_module.Settings(
         model_id=main_module.settings.model_id,

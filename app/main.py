@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from typing import List
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.requests import Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
@@ -46,6 +47,14 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     return JSONResponse(
         status_code=exc.status_code,
         content={"error": {"message": str(exc.detail), "type": "error"}},
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(
+        status_code=400,
+        content={"error": {"message": str(exc), "type": "invalid_request_error"}},
     )
 
 
