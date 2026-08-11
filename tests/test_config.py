@@ -5,6 +5,7 @@ def test_defaults_when_no_env_set(monkeypatch):
     for var in (
         "STT_MODEL_ID", "DEVICE", "COMPUTE_TYPE", "MAX_CONCURRENT_TRANSCRIPTIONS",
         "MAX_FILE_SIZE_MB", "STT_API_KEY", "HOST", "PORT", "JOB_RESULT_TTL_SECONDS",
+        "MAX_PENDING_JOBS",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -19,6 +20,7 @@ def test_defaults_when_no_env_set(monkeypatch):
     assert settings.host == "0.0.0.0"
     assert settings.port == 8000
     assert settings.job_result_ttl_seconds == 3600
+    assert settings.max_pending_jobs == 100
 
 
 def test_env_overrides_are_applied(monkeypatch):
@@ -30,6 +32,7 @@ def test_env_overrides_are_applied(monkeypatch):
     monkeypatch.setenv("STT_API_KEY", "secret")
     monkeypatch.setenv("PORT", "9000")
     monkeypatch.setenv("JOB_RESULT_TTL_SECONDS", "60")
+    monkeypatch.setenv("MAX_PENDING_JOBS", "5")
 
     settings = get_settings()
 
@@ -41,3 +44,4 @@ def test_env_overrides_are_applied(monkeypatch):
     assert settings.api_key == "secret"
     assert settings.port == 9000
     assert settings.job_result_ttl_seconds == 60
+    assert settings.max_pending_jobs == 5

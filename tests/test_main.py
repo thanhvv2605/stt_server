@@ -307,23 +307,80 @@ def test_submit_job_rejected_when_pending_job_cap_reached(monkeypatch):
     monkeypatch.setattr(main_module, "settings", low_cap_settings)
     app.dependency_overrides[get_transcription_service] = lambda: FakeService(_sample_result())
 
-    # Directly simulate 1 in-flight job (== the cap) without needing a real
-    # background task, by inserting a placeholder into the same set the
-    # handler checks the length of.
-    placeholder = object()
-    main_module._background_tasks.add(placeholder)
-    try:
-        resp = client.post(
-            "/v1/audio/transcriptions/jobs",
-            files={"file": ("a.wav", io.BytesIO(b"fake-audio-bytes"), "audio/wav")},
+    # Directly simulate 1 in-flight job (== the cap) by setting the counter
+    # the handler checks, rather than seeding _background_tasks — the cap is
+    # now enforced via _pending_job_count (see the concurrency test below for
+    # why: len(_background_tasks) is not updated synchronously enough to be
+    # race-free).
+    monkeypatch.setattr(main_module, "_pending_job_count", 1)
+    resp = client.post(
+        "/v1/audio/transcriptions/jobs",
+        files={"file": ("a.wav", io.BytesIO(b"fake-audio-bytes"), "audio/wav")},
+    )
+    assert resp.status_code == 503
+    assert resp.json()["error"] == {
+        "message": "Too many pending jobs, try again later",
+        "type": "server_error",
+    }
+
+
+async def test_concurrent_submits_enforce_pending_job_cap(monkeypatch):
+    # Regression test for a race where the pending-job cap was checked via
+    # len(_background_tasks), but _background_tasks.add(task) only happens
+    # AFTER an await point (copying the upload). Under concurrent submits,
+    # many requests could all observe a small set (since none had added
+    # their task yet) and all get accepted — reproduced empirically with
+    # max_pending_jobs=2 and 10 concurrent submits: 0 were rejected.
+    #
+    # The fix checks-and-reserves an explicit counter with no await between
+    # the check and the increment, so it can't be interleaved. This test
+    # uses httpx.AsyncClient + ASGITransport and fires submissions
+    # concurrently via asyncio.gather (not sequentially — sequential
+    # submission is already covered above and does not exercise the race)
+    # with a SlowFakeService so jobs stay in flight long enough to matter.
+    low_cap_settings = Settings(
+        model_id=main_module.settings.model_id,
+        device=main_module.settings.device,
+        compute_type=main_module.settings.compute_type,
+        max_concurrent_transcriptions=main_module.settings.max_concurrent_transcriptions,
+        max_file_size_mb=main_module.settings.max_file_size_mb,
+        api_key=main_module.settings.api_key,
+        host=main_module.settings.host,
+        port=main_module.settings.port,
+        max_pending_jobs=2,
+    )
+    monkeypatch.setattr(main_module, "settings", low_cap_settings)
+    app.dependency_overrides[get_transcription_service] = lambda: SlowFakeService(
+        _sample_result(), delay=0.3
+    )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client_:
+        responses = await asyncio.gather(
+            *[
+                client_.post(
+                    "/v1/audio/transcriptions/jobs",
+                    files={"file": ("a.wav", io.BytesIO(b"fake-audio-bytes"), "audio/wav")},
+                )
+                for _ in range(5)
+            ]
         )
-        assert resp.status_code == 503
-        assert resp.json()["error"] == {
-            "message": "Too many pending jobs, try again later",
-            "type": "server_error",
-        }
-    finally:
-        main_module._background_tasks.discard(placeholder)
+
+        statuses = [r.status_code for r in responses]
+        accepted = statuses.count(202)
+        rejected = statuses.count(503)
+
+        assert accepted + rejected == 5, f"unexpected status codes from concurrent submits: {statuses}"
+        assert accepted <= 2, f"expected at most 2 of 5 concurrent submits accepted (cap=2), got {accepted}"
+        assert rejected >= 3, f"expected at least 3 of 5 concurrent submits rejected (cap=2), got {rejected}"
+
+        # Let the in-flight background jobs finish so _pending_job_count is
+        # released back to 0 before the next test runs.
+        for _ in range(40):
+            if main_module._pending_job_count == 0:
+                break
+            await asyncio.sleep(0.05)
+        assert main_module._pending_job_count == 0
 
 
 def test_submit_then_poll_completes_via_background_task():

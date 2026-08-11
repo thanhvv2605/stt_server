@@ -223,7 +223,7 @@ All errors share the `{"error": {"message", "type"}}` shape.
 | `404` | `invalid_request_error` | (Job API only) `job_id` not found or expired — distinct from the generic route-not-found 404 above, which uses `type: "error"` | unknown/expired job id on `GET /jobs/{id}` |
 | `405` | `error` | HTTP method not allowed for the matched route | `GET /v1/audio/transcriptions` |
 | `500` | `server_error` | Any unexpected unhandled exception | bug / edge case |
-| `503` | `server_error` | Transcription failed for a reason other than a decode error (e.g. transient GPU/model failure) | GPU OOM, runtime error |
+| `503` | `server_error` | Transcription failed for a reason other than a decode error (e.g. transient GPU/model failure). Also returned by `POST /jobs` when `MAX_PENDING_JOBS` in-flight jobs are already queued/running | GPU OOM, runtime error; or too many pending jobs |
 
 ### Example — missing/wrong API key
 
@@ -341,6 +341,16 @@ curl -s -X POST http://localhost:8000/v1/audio/transcriptions/jobs \
 
 ```json
 { "job_id": "b3f1a2c4d5e6f7089a1b2c3d4e5f6789", "status": "queued" }
+```
+
+#### Response — too many pending jobs
+
+**`503 Service Unavailable`**
+
+Returned when `MAX_PENDING_JOBS` jobs are already queued/running. Retry later.
+
+```json
+{ "error": { "message": "Too many pending jobs, try again later", "type": "server_error" } }
 ```
 
 ### `GET /v1/audio/transcriptions/jobs/{job_id}`

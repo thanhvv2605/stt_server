@@ -25,6 +25,12 @@ settings = get_settings()
 verify_api_key = make_verify_api_key(settings)
 job_store = JobStore(ttl_seconds=settings.job_result_ttl_seconds)
 _background_tasks: set = set()
+_pending_job_count = 0
+
+
+def _release_pending_slot() -> None:
+    global _pending_job_count
+    _pending_job_count -= 1
 
 
 @asynccontextmanager
@@ -223,35 +229,22 @@ async def create_transcription_job(
     timestamp_granularities: List[str] = Form(default=[], alias="timestamp_granularities[]"),
     service: TranscriptionService = Depends(get_transcription_service),
 ):
-    if len(_background_tasks) >= settings.max_pending_jobs:
+    global _pending_job_count
+    if _pending_job_count >= settings.max_pending_jobs:
         raise HTTPException(
             status_code=503,
-            detail={"error": {"message": "Too many pending jobs, try again later", "type": "server_error"}},
-        )
-
-    max_bytes = settings.max_file_size_mb * 1024 * 1024
-    if file.size is not None and file.size > max_bytes:
-        raise HTTPException(
-            status_code=413,
             detail={
                 "error": {
-                    "message": f"File exceeds max size of {settings.max_file_size_mb}MB",
-                    "type": "file_too_large",
+                    "message": "Too many pending jobs, try again later",
+                    "type": "server_error",
                 }
             },
         )
-
-    suffix = os.path.splitext(file.filename or "")[1][:10] or ".audio"
-    word_timestamps = "word" in timestamp_granularities
-
-    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+    _pending_job_count += 1
+    slot_owned_by_task = False
     try:
-        await run_in_threadpool(shutil.copyfileobj, file.file, tmp)
-        tmp.flush()
-        tmp.close()
-
-        actual_size = os.path.getsize(tmp.name)
-        if actual_size > max_bytes:
+        max_bytes = settings.max_file_size_mb * 1024 * 1024
+        if file.size is not None and file.size > max_bytes:
             raise HTTPException(
                 status_code=413,
                 detail={
@@ -261,26 +254,56 @@ async def create_transcription_job(
                     }
                 },
             )
-        if actual_size == 0:
-            raise HTTPException(
-                status_code=400,
-                detail={"error": {"message": "Uploaded file is empty", "type": "invalid_request_error"}},
-            )
-    except BaseException:
+
+        suffix = os.path.splitext(file.filename or "")[1][:10] or ".audio"
+        word_timestamps = "word" in timestamp_granularities
+
+        tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
         try:
-            os.unlink(tmp.name)
-        except OSError:
-            pass
-        raise
+            await run_in_threadpool(shutil.copyfileobj, file.file, tmp)
+            tmp.flush()
+            tmp.close()
 
-    job = job_store.create()
-    task = asyncio.create_task(
-        _run_transcription_job(job.job_id, tmp.name, language or None, word_timestamps, service)
-    )
-    _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
+            actual_size = os.path.getsize(tmp.name)
+            if actual_size > max_bytes:
+                raise HTTPException(
+                    status_code=413,
+                    detail={
+                        "error": {
+                            "message": f"File exceeds max size of {settings.max_file_size_mb}MB",
+                            "type": "file_too_large",
+                        }
+                    },
+                )
+            if actual_size == 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"error": {"message": "Uploaded file is empty", "type": "invalid_request_error"}},
+                )
+        except BaseException:
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
+            raise
 
-    return JSONResponse(status_code=202, content={"job_id": job.job_id, "status": job.status})
+        job = job_store.create()
+        task = asyncio.create_task(
+            _run_transcription_job(job.job_id, tmp.name, language or None, word_timestamps, service)
+        )
+        _background_tasks.add(task)
+
+        def _on_job_task_done(finished_task: "asyncio.Task") -> None:
+            _background_tasks.discard(finished_task)
+            _release_pending_slot()
+
+        task.add_done_callback(_on_job_task_done)
+        slot_owned_by_task = True
+
+        return JSONResponse(status_code=202, content={"job_id": job.job_id, "status": job.status})
+    finally:
+        if not slot_owned_by_task:
+            _release_pending_slot()
 
 
 @app.get("/v1/audio/transcriptions/jobs/{job_id}", dependencies=[Depends(verify_api_key)])
