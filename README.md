@@ -41,6 +41,7 @@ All configuration is via environment variables (see `.env.example`):
 | `COMPUTE_TYPE` | `float16` | CTranslate2 compute type (e.g. `float16`, `int8`) |
 | `MAX_CONCURRENT_TRANSCRIPTIONS` | `4` | Max simultaneous transcriptions; also sets `WhisperModel(num_workers=...)` so CTranslate2 actually parallelizes |
 | `MAX_FILE_SIZE_MB` | `200` | Max accepted upload size, rejected with `413` above this |
+| `JOB_RESULT_TTL_SECONDS` | `3600` | How long a completed/failed async job's result stays available for polling before being purged from memory |
 | `STT_API_KEY` | `changeme-please-set-STT_API_KEY` | Bearer token required on `/v1/audio/transcriptions`; a warning is logged at startup if left at the default |
 | `HOST` | `0.0.0.0` | Bind address for uvicorn |
 | `PORT` | `8000` | Bind port for uvicorn |
@@ -80,6 +81,10 @@ All error responses (auth failures, invalid requests, decode failures, internal 
 | 405 | `error` | HTTP method not allowed for the matched route |
 | 500 | `server_error` | Any unexpected unhandled exception |
 | 503 | `server_error` | Transcription failed for a reason other than a decode error (e.g. transient GPU/model failure) |
+
+### Async job API
+
+For batch/high-traffic use, `POST /v1/audio/transcriptions/jobs` and `GET /v1/audio/transcriptions/jobs/{job_id}` avoid holding a single HTTP connection open for the full queue-wait + transcription duration — every individual request completes in milliseconds. See `API.md` for the full contract with curl examples. Job results are kept in memory only (lost on restart) for `JOB_RESULT_TTL_SECONDS` after completion.
 
 ## Tests
 

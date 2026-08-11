@@ -35,8 +35,10 @@ curl -s http://localhost:8000/health
 **`200 OK`**
 
 ```json
-{ "status": "ok" }
+{ "status": "ok", "queue_depth": 0 }
 ```
+
+`queue_depth` is the number of transcription requests (sync or async job) currently waiting for a free GPU slot — not counting ones actively transcribing. Use it to self-throttle batch submission instead of guessing.
 
 ### Response — server still starting up (model not loaded yet)
 
@@ -218,6 +220,7 @@ All errors share the `{"error": {"message", "type"}}` shape.
 | `401` | `invalid_api_key` | Missing or incorrect `Authorization: Bearer <key>` header | wrong/omitted API key |
 | `413` | `file_too_large` | Upload exceeds `MAX_FILE_SIZE_MB` | oversized file |
 | `404` | `error` | No route matches the request path | typo in URL |
+| `404` | `invalid_request_error` | (Job API only) `job_id` not found or expired — distinct from the generic route-not-found 404 above, which uses `type: "error"` | unknown/expired job id on `GET /jobs/{id}` |
 | `405` | `error` | HTTP method not allowed for the matched route | `GET /v1/audio/transcriptions` |
 | `500` | `server_error` | Any unexpected unhandled exception | bug / edge case |
 | `503` | `server_error` | Transcription failed for a reason other than a decode error (e.g. transient GPU/model failure) | GPU OOM, runtime error |
@@ -305,6 +308,106 @@ curl -s -X POST http://localhost:8000/v1/audio/transcriptions \
 ```json
 { "error": { "message": "Could not decode audio file", "type": "invalid_request_error" } }
 ```
+
+---
+
+## Async Job API
+
+For batch or high-traffic use, prefer submit-then-poll over the synchronous endpoint above: every individual request (submit, poll) completes in milliseconds, so no connection is ever held open long enough to hit an intermediate NAT/proxy idle timeout.
+
+### `POST /v1/audio/transcriptions/jobs`
+
+Same auth as the sync endpoint. `multipart/form-data`.
+
+| Field | Required | Description |
+|---|---|---|
+| `file` | Yes | Audio file. Same validation as the sync endpoint (`400` empty/missing, `413` oversized). |
+| `language` | No | ISO code; omit for auto-detect. |
+| `timestamp_granularities[]` | No | `word` — include word-level timestamps in the completed result. |
+
+Returns immediately, before any GPU work happens.
+
+#### curl
+
+```bash
+curl -s -X POST http://localhost:8000/v1/audio/transcriptions/jobs \
+  -H "Authorization: Bearer $STT_API_KEY" \
+  -F "file=@sample.wav"
+```
+
+#### Response
+
+**`202 Accepted`**
+
+```json
+{ "job_id": "b3f1a2c4d5e6f7089a1b2c3d4e5f6789", "status": "queued" }
+```
+
+### `GET /v1/audio/transcriptions/jobs/{job_id}`
+
+Same auth as the sync endpoint.
+
+#### curl
+
+```bash
+curl -s http://localhost:8000/v1/audio/transcriptions/jobs/b3f1a2c4d5e6f7089a1b2c3d4e5f6789 \
+  -H "Authorization: Bearer $STT_API_KEY"
+```
+
+#### Response — still queued
+
+**`200 OK`**
+
+```json
+{ "job_id": "b3f1a2c4d5e6f7089a1b2c3d4e5f6789", "status": "queued", "result": null, "error": null }
+```
+
+#### Response — completed
+
+**`200 OK`**
+
+```json
+{
+  "job_id": "b3f1a2c4d5e6f7089a1b2c3d4e5f6789",
+  "status": "completed",
+  "result": {
+    "text": "Xin chào, đây là bản ghi âm thử nghiệm.",
+    "language": "vi",
+    "duration": 4.2,
+    "segments": [
+      { "id": 0, "start": 0.0, "end": 2.1, "text": " Xin chào," },
+      { "id": 1, "start": 2.1, "end": 4.2, "text": " đây là bản ghi âm thử nghiệm." }
+    ],
+    "words": null
+  },
+  "error": null
+}
+```
+
+Job results always use this full shape (there is no `response_format` for jobs) — extract `.result.text` if you only need plain text.
+
+#### Response — failed
+
+**`200 OK`**
+
+```json
+{
+  "job_id": "b3f1a2c4d5e6f7089a1b2c3d4e5f6789",
+  "status": "failed",
+  "result": null,
+  "error": { "message": "Could not decode audio file", "type": "invalid_request_error" }
+}
+```
+
+#### Response — unknown or expired job id
+
+**`404 Not Found`**
+
+```json
+{ "error": { "message": "Job not found", "type": "invalid_request_error" } }
+```
+
+Job results are purged `JOB_RESULT_TTL_SECONDS` (default 1 hour) after creation — poll before then.
 
 ---
 
