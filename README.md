@@ -27,12 +27,15 @@ uvicorn app.main:app --host "$HOST" --port "$PORT"
 
 First startup downloads the model from the Hugging Face Hub (requires internet access) and can take a few minutes.
 
+`.env.example` ships with `HF_HUB_OFFLINE=1`, which skips the Hub's online "check for a newer revision" call and only uses the local cache. This is safe once the model has been downloaded at least once, and avoids a long hang on environments where IPv6 is broken/unreachable (the Hub client tries an online check first, and a broken IPv6 route can leave that connection attempt hanging for a long time before it gives up). **For the very first run**, if the model isn't cached yet, temporarily comment out or unset `HF_HUB_OFFLINE` so the initial download can happen, then leave it set to `1` for all subsequent starts.
+
 ## Configuration
 
 All configuration is via environment variables (see `.env.example`):
 
 | Variable | Default | Description |
 |---|---|---|
+| `HF_HUB_OFFLINE` | `1` | Read directly by `huggingface_hub` (not by this app's own config) — skips the online revision check on startup; see note above. Unset for the very first (uncached) run. |
 | `STT_MODEL_ID` | `deepdml/faster-whisper-large-v3-turbo-ct2` | CTranslate2 model repo/path passed to `WhisperModel` |
 | `DEVICE` | `cuda` | Inference device (`cuda` or `cpu`) |
 | `COMPUTE_TYPE` | `float16` | CTranslate2 compute type (e.g. `float16`, `int8`) |
