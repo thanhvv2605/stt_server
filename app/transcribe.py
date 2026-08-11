@@ -33,15 +33,27 @@ class TranscriptionService:
         self._model = model
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._executor = ThreadPoolExecutor(max_workers=max_concurrent)
+        self._waiting = 0
+
+    @property
+    def queue_depth(self) -> int:
+        return self._waiting
 
     async def transcribe(
         self, audio_path: str, language: Optional[str], word_timestamps: bool
     ) -> TranscriptionResult:
-        async with self._semaphore:
+        self._waiting += 1
+        try:
+            await self._semaphore.acquire()
+        finally:
+            self._waiting -= 1
+        try:
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(
                 self._executor, self._transcribe_sync, audio_path, language, word_timestamps
             )
+        finally:
+            self._semaphore.release()
 
     def _transcribe_sync(
         self, audio_path: str, language: Optional[str], word_timestamps: bool

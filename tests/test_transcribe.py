@@ -100,3 +100,26 @@ async def test_transcribe_limits_concurrency_to_max_concurrent():
 
     assert model.max_in_flight == 2
     service.shutdown()
+
+
+async def test_queue_depth_reflects_waiting_requests():
+    import asyncio
+
+    segments = [FakeSegment(0, 0.0, 1.0, " hi")]
+    model = FakeWhisperModel(segments, delay=0.2)
+    service = TranscriptionService(model, max_concurrent=2)
+
+    assert service.queue_depth == 0
+
+    tasks = [
+        asyncio.create_task(service.transcribe("audio.wav", language=None, word_timestamps=False))
+        for _ in range(5)
+    ]
+    await asyncio.sleep(0.05)  # 2 of 5 should have acquired a slot by now; 3 still waiting
+    waiting_snapshot = service.queue_depth
+
+    await asyncio.gather(*tasks)
+
+    assert waiting_snapshot == 3
+    assert service.queue_depth == 0
+    service.shutdown()
