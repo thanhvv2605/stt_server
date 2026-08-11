@@ -203,8 +203,12 @@ async def _run_transcription_job(
         logger.exception("Job %s: transcription failed", job_id)
         job_store.mark_failed(job_id, {"message": "server busy, try again", "type": "server_error"})
     else:
-        verbose = _build_verbose_result(result, word_timestamps)
-        job_store.mark_completed(job_id, verbose.model_dump())
+        try:
+            verbose = _build_verbose_result(result, word_timestamps)
+            job_store.mark_completed(job_id, verbose.model_dump())
+        except Exception:
+            logger.exception("Job %s: failed to build result", job_id)
+            job_store.mark_failed(job_id, {"message": "server busy, try again", "type": "server_error"})
     finally:
         try:
             os.unlink(tmp_path)
@@ -219,6 +223,12 @@ async def create_transcription_job(
     timestamp_granularities: List[str] = Form(default=[], alias="timestamp_granularities[]"),
     service: TranscriptionService = Depends(get_transcription_service),
 ):
+    if len(_background_tasks) >= settings.max_pending_jobs:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": {"message": "Too many pending jobs, try again later", "type": "server_error"}},
+        )
+
     max_bytes = settings.max_file_size_mb * 1024 * 1024
     if file.size is not None and file.size > max_bytes:
         raise HTTPException(

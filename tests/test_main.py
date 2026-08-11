@@ -1,5 +1,8 @@
 import asyncio
+import glob
 import io
+import os
+import tempfile
 import time
 
 import httpx
@@ -289,6 +292,40 @@ def test_submit_job_file_too_large_rejected(monkeypatch):
     assert resp.status_code == 413
 
 
+def test_submit_job_rejected_when_pending_job_cap_reached(monkeypatch):
+    low_cap_settings = Settings(
+        model_id=main_module.settings.model_id,
+        device=main_module.settings.device,
+        compute_type=main_module.settings.compute_type,
+        max_concurrent_transcriptions=main_module.settings.max_concurrent_transcriptions,
+        max_file_size_mb=main_module.settings.max_file_size_mb,
+        api_key=main_module.settings.api_key,
+        host=main_module.settings.host,
+        port=main_module.settings.port,
+        max_pending_jobs=1,
+    )
+    monkeypatch.setattr(main_module, "settings", low_cap_settings)
+    app.dependency_overrides[get_transcription_service] = lambda: FakeService(_sample_result())
+
+    # Directly simulate 1 in-flight job (== the cap) without needing a real
+    # background task, by inserting a placeholder into the same set the
+    # handler checks the length of.
+    placeholder = object()
+    main_module._background_tasks.add(placeholder)
+    try:
+        resp = client.post(
+            "/v1/audio/transcriptions/jobs",
+            files={"file": ("a.wav", io.BytesIO(b"fake-audio-bytes"), "audio/wav")},
+        )
+        assert resp.status_code == 503
+        assert resp.json()["error"] == {
+            "message": "Too many pending jobs, try again later",
+            "type": "server_error",
+        }
+    finally:
+        main_module._background_tasks.discard(placeholder)
+
+
 def test_submit_then_poll_completes_via_background_task():
     app.dependency_overrides[get_transcription_service] = lambda: FakeService(_sample_result())
     submit_resp = client.post(
@@ -351,3 +388,98 @@ async def test_submit_does_not_block_on_transcription():
         assert body["status"] == "completed"
         assert body["result"]["text"] == "hi"
         assert body["error"] is None
+
+
+async def _submit_and_wait_for_terminal_status(client_, service):
+    app.dependency_overrides[get_transcription_service] = lambda: service
+    submit_resp = await client_.post(
+        "/v1/audio/transcriptions/jobs",
+        files={"file": ("a.wav", io.BytesIO(b"fake-audio-bytes"), "audio/wav")},
+    )
+    assert submit_resp.status_code == 202
+    job_id = submit_resp.json()["job_id"]
+
+    body = None
+    for _ in range(40):
+        poll_resp = await client_.get(f"/v1/audio/transcriptions/jobs/{job_id}")
+        body = poll_resp.json()
+        if body["status"] != "queued":
+            break
+        await asyncio.sleep(0.05)
+
+    return body
+
+
+async def test_job_worker_maps_decode_failure_to_failed_status():
+    # Exercises _run_transcription_job's own (OSError, ValueError, IndexError)
+    # branch via the real background-task path, not JobStore directly.
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client_:
+        body = await _submit_and_wait_for_terminal_status(
+            client_, FakeService(raise_exc=ValueError("bad audio"))
+        )
+
+    assert body["status"] == "failed"
+    assert body["error"] == {"message": "Could not decode audio file", "type": "invalid_request_error"}
+    assert body["result"] is None
+
+
+async def test_job_worker_maps_generic_failure_to_failed_status():
+    # Exercises _run_transcription_job's own generic Exception branch via the
+    # real background-task path, not JobStore directly.
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client_:
+        body = await _submit_and_wait_for_terminal_status(
+            client_, FakeService(raise_exc=RuntimeError("boom"))
+        )
+
+    assert body["status"] == "failed"
+    assert body["error"] == {"message": "server busy, try again", "type": "server_error"}
+    assert body["result"] is None
+
+
+async def test_job_worker_result_build_failure_still_reaches_terminal_status():
+    # Regression test for the bug where an exception raised while building
+    # the result (after service.transcribe() already succeeded) was not
+    # caught anywhere, leaving the job stuck on "queued" forever. A
+    # TranscriptionResult with language=None makes TranscriptionVerboseJSON
+    # validation fail inside _build_verbose_result/model_dump.
+    bad_result = TranscriptionResult(text="hi", language=None, duration=1.0, segments=[])
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client_:
+        body = await _submit_and_wait_for_terminal_status(client_, FakeService(bad_result))
+
+    assert body is not None
+    assert body["status"] == "failed", f"job never reached a terminal status: {body}"
+    assert body["error"] == {"message": "server busy, try again", "type": "server_error"}
+    assert body["result"] is None
+
+
+async def test_job_temp_file_deleted_after_completion():
+    # The job worker writes the upload to a NamedTemporaryFile(delete=False)
+    # and must unlink it once the job reaches a terminal state. Use a
+    # distinctive suffix so this test's temp file can be told apart from
+    # anything else that happens to be in the system temp dir.
+    marker_glob = os.path.join(tempfile.gettempdir(), "*.zigguratmarker")
+    assert glob.glob(marker_glob) == []
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client_:
+        app.dependency_overrides[get_transcription_service] = lambda: FakeService(_sample_result())
+        submit_resp = await client_.post(
+            "/v1/audio/transcriptions/jobs",
+            files={"file": ("a.zigguratmarker", io.BytesIO(b"fake-audio-bytes"), "audio/wav")},
+        )
+        assert submit_resp.status_code == 202
+        job_id = submit_resp.json()["job_id"]
+
+        body = None
+        for _ in range(40):
+            poll_resp = await client_.get(f"/v1/audio/transcriptions/jobs/{job_id}")
+            body = poll_resp.json()
+            if body["status"] != "queued":
+                break
+            await asyncio.sleep(0.05)
+
+    assert body["status"] == "completed"
+    assert glob.glob(marker_glob) == []

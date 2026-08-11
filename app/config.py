@@ -13,6 +13,7 @@ class Settings:
     host: str
     port: int
     job_result_ttl_seconds: int = 3600
+    max_pending_jobs: int = 100
 
 
 def get_settings() -> Settings:
@@ -26,4 +27,5 @@ def get_settings() -> Settings:
         host=os.environ.get("HOST", "0.0.0.0"),
         port=int(os.environ.get("PORT", "8000")),
         job_result_ttl_seconds=int(os.environ.get("JOB_RESULT_TTL_SECONDS", "3600")),
+        max_pending_jobs=int(os.environ.get("MAX_PENDING_JOBS", "100")),
     )
