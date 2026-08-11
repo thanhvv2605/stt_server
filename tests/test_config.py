@@ -4,7 +4,7 @@ from app.config import get_settings
 def test_defaults_when_no_env_set(monkeypatch):
     for var in (
         "STT_MODEL_ID", "DEVICE", "COMPUTE_TYPE", "MAX_CONCURRENT_TRANSCRIPTIONS",
-        "MAX_FILE_SIZE_MB", "STT_API_KEY", "HOST", "PORT",
+        "MAX_FILE_SIZE_MB", "STT_API_KEY", "HOST", "PORT", "JOB_RESULT_TTL_SECONDS",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -18,6 +18,7 @@ def test_defaults_when_no_env_set(monkeypatch):
     assert settings.api_key == "changeme-please-set-STT_API_KEY"
     assert settings.host == "0.0.0.0"
     assert settings.port == 8000
+    assert settings.job_result_ttl_seconds == 3600
 
 
 def test_env_overrides_are_applied(monkeypatch):
@@ -28,6 +29,7 @@ def test_env_overrides_are_applied(monkeypatch):
     monkeypatch.setenv("MAX_FILE_SIZE_MB", "50")
     monkeypatch.setenv("STT_API_KEY", "secret")
     monkeypatch.setenv("PORT", "9000")
+    monkeypatch.setenv("JOB_RESULT_TTL_SECONDS", "60")
 
     settings = get_settings()
 
@@ -38,3 +40,4 @@ def test_env_overrides_are_applied(monkeypatch):
     assert settings.max_file_size_mb == 50
     assert settings.api_key == "secret"
     assert settings.port == 9000
+    assert settings.job_result_ttl_seconds == 60

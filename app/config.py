@@ -12,6 +12,7 @@ class Settings:
     api_key: str
     host: str
     port: int
+    job_result_ttl_seconds: int = 3600
 
 
 def get_settings() -> Settings:
@@ -24,4 +25,5 @@ def get_settings() -> Settings:
         api_key=os.environ.get("STT_API_KEY", "changeme-please-set-STT_API_KEY"),
         host=os.environ.get("HOST", "0.0.0.0"),
         port=int(os.environ.get("PORT", "8000")),
+        job_result_ttl_seconds=int(os.environ.get("JOB_RESULT_TTL_SECONDS", "3600")),
     )
