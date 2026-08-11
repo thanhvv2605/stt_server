@@ -25,6 +25,8 @@ set -a; source .env; set +a
 uvicorn app.main:app --host "$HOST" --port "$PORT"
 ```
 
+The async job API (`/v1/audio/transcriptions/jobs`) keeps all job state in process memory, so do not run with `--workers > 1` — a single process is assumed throughout; with multiple worker processes, job submission and polling would be split across processes and polls would non-deterministically 404.
+
 First startup downloads the model from the Hugging Face Hub (requires internet access) and can take a few minutes.
 
 `.env.example` ships with `HF_HUB_OFFLINE=1`, which skips the Hub's online "check for a newer revision" call and only uses the local cache. This is safe once the model has been downloaded at least once, and avoids a long hang on environments where IPv6 is broken/unreachable (the Hub client tries an online check first, and a broken IPv6 route can leave that connection attempt hanging for a long time before it gives up). **For the very first run**, if the model isn't cached yet, temporarily comment out or unset `HF_HUB_OFFLINE` so the initial download can happen, then leave it set to `1` for all subsequent starts.
@@ -41,7 +43,8 @@ All configuration is via environment variables (see `.env.example`):
 | `COMPUTE_TYPE` | `float16` | CTranslate2 compute type (e.g. `float16`, `int8`) |
 | `MAX_CONCURRENT_TRANSCRIPTIONS` | `4` | Max simultaneous transcriptions; also sets `WhisperModel(num_workers=...)` so CTranslate2 actually parallelizes |
 | `MAX_FILE_SIZE_MB` | `200` | Max accepted upload size, rejected with `413` above this |
-| `JOB_RESULT_TTL_SECONDS` | `3600` | How long a completed/failed async job's result stays available for polling before being purged from memory |
+| `JOB_RESULT_TTL_SECONDS` | `3600` | How long a completed/failed async job's result stays available for polling after creation, before being purged from memory |
+| `MAX_PENDING_JOBS` | `100` | Max async jobs allowed in flight (submitted but not yet finished) at once; further submissions get `503` until some finish |
 | `STT_API_KEY` | `changeme-please-set-STT_API_KEY` | Bearer token required on `/v1/audio/transcriptions`; a warning is logged at startup if left at the default |
 | `HOST` | `0.0.0.0` | Bind address for uvicorn |
 | `PORT` | `8000` | Bind port for uvicorn |
@@ -84,7 +87,7 @@ All error responses (auth failures, invalid requests, decode failures, internal 
 
 ### Async job API
 
-For batch/high-traffic use, `POST /v1/audio/transcriptions/jobs` and `GET /v1/audio/transcriptions/jobs/{job_id}` avoid holding a single HTTP connection open for the full queue-wait + transcription duration — every individual request completes in milliseconds. See `API.md` for the full contract with curl examples. Job results are kept in memory only (lost on restart) for `JOB_RESULT_TTL_SECONDS` after completion.
+For batch/high-traffic use, `POST /v1/audio/transcriptions/jobs` and `GET /v1/audio/transcriptions/jobs/{job_id}` avoid holding a single HTTP connection open for the full queue-wait + transcription duration — every individual request completes in milliseconds. See `API.md` for the full contract with curl examples. Job results are kept in memory only (lost on restart) for `JOB_RESULT_TTL_SECONDS` after creation.
 
 ## Tests
 
