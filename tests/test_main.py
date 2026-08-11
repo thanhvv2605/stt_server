@@ -1,6 +1,8 @@
+import asyncio
 import io
 import time
 
+import httpx
 from fastapi.testclient import TestClient
 
 from app import main as main_module
@@ -31,6 +33,19 @@ class FakeService:
     async def transcribe(self, audio_path, language, word_timestamps):
         if self._raise_exc:
             raise self._raise_exc
+        return self._result
+
+
+class SlowFakeService:
+    """Transcription fake with a genuine await point, so tests can observe
+    that a job is still in flight rather than finishing synchronously."""
+
+    def __init__(self, result=None, delay=0.2):
+        self._result = result
+        self._delay = delay
+
+    async def transcribe(self, audio_path, language, word_timestamps):
+        await asyncio.sleep(self._delay)
         return self._result
 
 
@@ -294,3 +309,45 @@ def test_submit_then_poll_completes_via_background_task():
     assert body["status"] == "completed"
     assert body["result"]["text"] == "hi"
     assert body["error"] is None
+
+
+async def test_submit_does_not_block_on_transcription():
+    # Uses httpx.AsyncClient + ASGITransport (not TestClient) so the whole
+    # test runs on a single persistent event loop. TestClient opens a fresh
+    # event-loop portal per call, which lets a synchronous fake finish
+    # "instantly" and hides whether the handler actually awaited the
+    # transcription before responding. A real await point (SlowFakeService)
+    # plus a single loop is what lets this test actually distinguish
+    # fire-and-forget submission from an inline-awaited (broken) one.
+    app.dependency_overrides[get_transcription_service] = lambda: SlowFakeService(
+        _sample_result(), delay=0.2
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client_:
+        start = time.monotonic()
+        submit_resp = await client_.post(
+            "/v1/audio/transcriptions/jobs",
+            files={"file": ("a.wav", io.BytesIO(b"fake-audio-bytes"), "audio/wav")},
+        )
+        elapsed = time.monotonic() - start
+
+        assert submit_resp.status_code == 202
+        assert elapsed < 0.15, f"submit took {elapsed:.3f}s — looks like it awaited transcription"
+        job_id = submit_resp.json()["job_id"]
+
+        # Poll immediately: the fake transcription takes 0.2s, so the job
+        # must still be queued right after the (fast) submit response.
+        poll_resp = await client_.get(f"/v1/audio/transcriptions/jobs/{job_id}")
+        assert poll_resp.json()["status"] == "queued"
+
+        body = None
+        for _ in range(20):
+            poll_resp = await client_.get(f"/v1/audio/transcriptions/jobs/{job_id}")
+            body = poll_resp.json()
+            if body["status"] != "queued":
+                break
+            await asyncio.sleep(0.05)
+
+        assert body["status"] == "completed"
+        assert body["result"]["text"] == "hi"
+        assert body["error"] is None

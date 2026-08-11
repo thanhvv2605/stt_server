@@ -256,8 +256,11 @@ async def create_transcription_job(
                 status_code=400,
                 detail={"error": {"message": "Uploaded file is empty", "type": "invalid_request_error"}},
             )
-    except Exception:
-        os.unlink(tmp.name)
+    except BaseException:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
         raise
 
     job = job_store.create()
