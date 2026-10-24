@@ -1,5 +1,7 @@
 # STT Server
 
+[![CI](https://github.com/thanhvv2605/stt_server/actions/workflows/ci.yml/badge.svg)](https://github.com/thanhvv2605/stt_server/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Simple FastAPI speech-to-text server using `whisper-large-v3-turbo` via faster-whisper (CTranslate2), OpenAI-compatible `/v1/audio/transcriptions` endpoint.
 
 ## Prerequisites
